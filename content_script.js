@@ -67,15 +67,123 @@
         }
 
         handleMouseUp(e) {
+            // container.__createdAt = Date.now();
             if (e.target.closest('#selection-buttons') || e.target.closest('#settings-panel')) return;
+            // 'selection-buttons'
+            const container = document.getElementById('selection-buttons');
+            if (container && container.__createdAt && Date.now() - container.__createdAt > 100 && this.prevSelectionText === window.getSelection().toString()) {
+                container.remove();
+                window.getSelection().removeAllRanges();
+                return;
+            }
+
+            // 선택된 요소가 편집 가능한지 확인
+            const selection = window.getSelection();
+            const selectedNode = selection.anchorNode;
+
+            // 선택된 노드가 없는 경우 처리
+            if (!selectedNode) return;
+
+            // 편집 가능한 요소 체크
+            const editableElement = selectedNode.parentElement?.closest('[contenteditable="true"], input, textarea, [role="textbox"]');
+            if (editableElement) return;
+
+            // contentEditable 속성 직접 체크
+            if (selectedNode.parentElement?.getAttribute('contenteditable') === 'true') return;
+            if (selectedNode.parentElement?.isContentEditable) return;
+
+            // designMode 체크
+            if (document.designMode === 'on') return;
+
+            // 커스텀 에디터 프레임워크 체크 
+            const possibleEditors = selectedNode.parentElement?.closest('.ql-editor, .ProseMirror, .CodeMirror, .ace_editor, .monaco-editor');
+            if (possibleEditors) return;
+
+            // iframe 내부 선택 체크
+            const iframe = selectedNode.parentElement?.closest('iframe');
+            if (iframe) {
+                try {
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    if (iframeDoc.designMode === 'on') return;
+                } catch (e) {
+                    // 크로스 오리진 iframe은 무시
+                }
+            }
+
+            // contentEditable이 상속된 경우 체크
+            let parent = selectedNode.parentElement;
+            while (parent) {
+                if (window.getComputedStyle(parent).webkitUserModify?.includes('write')) return;
+                parent = parent.parentElement;
+            }
+
             this.removeExistingLayer();
 
-            const selectedText = window.getSelection().toString();
+            const selectedText = selection.toString();
             if (!selectedText) return;
 
-            const range = window.getSelection().getRangeAt(0);
-            this.selectedRange = range;
-            const rect = range.getBoundingClientRect();
+            const range = selection.getRangeAt(0);
+            const startContainer = range.startContainer;
+            const endContainer = range.endContainer;
+
+            // 여러 엘리먼트에 걸쳐있는 경우
+            if (startContainer.parentElement !== endContainer.parentElement) {
+                try {
+                    // 선택된 모든 엘리먼트를 순회하면서 실제 텍스트 내용이 있는지 확인
+                    const walker = document.createTreeWalker(
+                        range.commonAncestorContainer,
+                        NodeFilter.SHOW_TEXT,
+                        {
+                            acceptNode: function (node) {
+                                if (range.intersectsNode(node)) {
+                                    return NodeFilter.FILTER_ACCEPT;
+                                }
+                                return NodeFilter.FILTER_REJECT;
+                            }
+                        }
+                    );
+
+                    let node;
+                    let validNodes = [];
+                    while (node = walker.nextNode()) {
+                        const nodeText = node.textContent.trim();
+                        if (nodeText && !/^\s*$/.test(nodeText)) {
+                            validNodes.push(node);
+                        }
+                    }
+
+                    if (validNodes.length > 0) {
+                        const newRange = document.createRange();
+                        newRange.setStart(validNodes[0], 0);
+                        newRange.setEnd(validNodes[validNodes.length - 1], validNodes[validNodes.length - 1].length);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+                    }
+                } catch (error) {
+                    console.error('Range adjustment failed:', error);
+                    return;
+                }
+            }
+
+            // 줄바꿈으로 끝나는 경우 처리
+            if (selectedText.endsWith('\n')) {
+                const currentRange = selection.getRangeAt(0);
+                const endContainer = currentRange.endContainer;
+                const endOffset = Math.min(currentRange.endOffset - 0, endContainer.length);
+
+                try {
+                    currentRange.setEnd(endContainer, endOffset);
+                    selection.removeAllRanges();
+                    selection.addRange(currentRange);
+                } catch (error) {
+                    console.error('Range adjustment failed:', error);
+                    return;
+                }
+            }
+
+            this.selectedRange = selection.getRangeAt(0);
+            const rect = this.selectedRange.getBoundingClientRect();
+            this.prevSelectionText = window.getSelection().toString();
 
             this.createButtonContainer(rect);
         }
@@ -87,6 +195,7 @@
             container.style.left = `${window.scrollX + rect.left}px`;
             container.style.top = `${window.scrollY + rect.bottom + 10}px`;
             container.style.zIndex = '999999';
+            container.__createdAt = Date.now();
 
             this.createButtons(container);
             document.body.appendChild(container);
