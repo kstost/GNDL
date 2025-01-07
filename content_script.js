@@ -10,6 +10,7 @@
             };
             this.initializeSettings();
             this.translations = window.translations;
+            this.scrollableParent = null; // 스크롤 가능한 부모 요소 저장
         }
 
         async initializeSettings() {
@@ -66,6 +67,27 @@
             }, 3000);
         }
 
+        // 스크롤 가능한 부모 요소 찾기
+        findScrollableParent(element) {
+            if (!element) return null;
+            
+            const isScrollable = (el) => {
+                const style = window.getComputedStyle(el);
+                const overflowY = style.getPropertyValue('overflow-y');
+                return (overflowY === 'scroll' || overflowY === 'auto') && 
+                       el.scrollHeight > el.clientHeight;
+            };
+
+            let parent = element.parentElement;
+            while (parent) {
+                if (isScrollable(parent)) {
+                    return parent;
+                }
+                parent = parent.parentElement;
+            }
+            return null;
+        }
+
         handleMouseUp(e) {
             // container.__createdAt = Date.now();
             if (e.target.closest('#selection-buttons') || e.target.closest('#settings-panel')) return;
@@ -86,6 +108,15 @@
 
             // 편집 가능한 요소 체크
             const editableElement = selectedNode.parentElement?.closest('[contenteditable="true"], input, textarea, [role="textbox"]');
+            const currentlyFocusedElement = document.activeElement;
+            // 현재 포커스된 요소가 편집 가능한지 확인
+            if (currentlyFocusedElement && (
+                currentlyFocusedElement.hasAttribute('contenteditable') ||
+                currentlyFocusedElement.tagName === 'INPUT' ||
+                currentlyFocusedElement.tagName === 'TEXTAREA' ||
+                currentlyFocusedElement.getAttribute('role') === 'textbox' ||
+                currentlyFocusedElement.isContentEditable
+            )) return;
             if (editableElement) return;
 
             // contentEditable 속성 직접 체크
@@ -125,6 +156,12 @@
             const range = selection.getRangeAt(0);
             const startContainer = range.startContainer;
             const endContainer = range.endContainer;
+
+            // 스크롤 가능한 부모 요소 찾기
+            this.scrollableParent = this.findScrollableParent(startContainer.parentElement);
+            if (this.scrollableParent) {
+                this.scrollableParent.addEventListener('scroll', this.handleScroll);
+            }
 
             // 여러 엘리먼트에 걸쳐있는 경우
             if (startContainer.parentElement !== endContainer.parentElement) {
@@ -192,27 +229,57 @@
             const container = document.createElement('div');
             container.id = 'selection-buttons';
             container.style.position = 'absolute';
-            container.style.left = `${window.scrollX + rect.left}px`;
-            container.style.top = `${window.scrollY + rect.bottom + 10}px`;
+            
+            // 스크롤 가능한 부모 요소가 있는 경우 상대적인 위치 계산
+            if (this.scrollableParent) {
+                const parentRect = this.scrollableParent.getBoundingClientRect();
+                container.style.left = `${rect.left - parentRect.left + this.scrollableParent.scrollLeft}px`;
+                container.style.top = `${rect.bottom - parentRect.top + this.scrollableParent.scrollTop + 10}px`;
+            } else {
+                container.style.left = `${window.scrollX + rect.left}px`;
+                container.style.top = `${window.scrollY + rect.bottom + 10}px`;
+            }
+            
             container.style.zIndex = '999999';
             container.__createdAt = Date.now();
 
             this.createButtons(container);
-            document.body.appendChild(container);
+            
+            // 스크롤 가능한 부모 요소가 있는 경우 그 안에 컨테이너 추가
+            if (this.scrollableParent) {
+                this.scrollableParent.appendChild(container);
+            } else {
+                document.body.appendChild(container);
+            }
         }
 
         handleScroll() {
             if (this.selectedRange && document.getElementById('selection-buttons')) {
                 const rect = this.selectedRange.getBoundingClientRect();
-
-                if (rect.top < 0 || rect.bottom > window.innerHeight) {
-                    this.removeExistingLayer();
-                    return;
-                }
-
                 const container = document.getElementById('selection-buttons');
-                container.style.left = `${window.scrollX + rect.left}px`;
-                container.style.top = `${window.scrollY + rect.bottom + 10}px`;
+
+                // 스크롤 가능한 부모 요소가 있는 경우
+                if (this.scrollableParent) {
+                    const parentRect = this.scrollableParent.getBoundingClientRect();
+                    
+                    // 선택 영역이 부모 요소의 뷰포트를 벗어났는지 확인
+                    if (rect.top < parentRect.top || rect.bottom > parentRect.bottom) {
+                        this.removeExistingLayer();
+                        return;
+                    }
+
+                    container.style.left = `${rect.left - parentRect.left + this.scrollableParent.scrollLeft}px`;
+                    container.style.top = `${rect.bottom - parentRect.top + this.scrollableParent.scrollTop + 10}px`;
+                } else {
+                    // 전체 윈도우 기준으로 처리
+                    if (rect.top < 0 || rect.bottom > window.innerHeight) {
+                        this.removeExistingLayer();
+                        return;
+                    }
+
+                    container.style.left = `${window.scrollX + rect.left}px`;
+                    container.style.top = `${window.scrollY + rect.bottom + 10}px`;
+                }
             }
         }
 
@@ -484,8 +551,14 @@
             const newRect = this.selectedRange.getBoundingClientRect();
             const container = document.getElementById('selection-buttons');
             if (container) {
-                container.style.left = `${window.scrollX + newRect.left}px`;
-                container.style.top = `${window.scrollY + newRect.bottom + 10}px`;
+                if (this.scrollableParent) {
+                    const parentRect = this.scrollableParent.getBoundingClientRect();
+                    container.style.left = `${newRect.left - parentRect.left + this.scrollableParent.scrollLeft}px`;
+                    container.style.top = `${newRect.bottom - parentRect.top + this.scrollableParent.scrollTop + 10}px`;
+                } else {
+                    container.style.left = `${window.scrollX + newRect.left}px`;
+                    container.style.top = `${window.scrollY + newRect.bottom + 10}px`;
+                }
             }
         }
 
@@ -511,6 +584,12 @@
             if (existingLayer) {
                 existingLayer.remove();
             }
+            
+            // 스크롤 이벤트 리스너 제거
+            if (this.scrollableParent) {
+                this.scrollableParent.removeEventListener('scroll', this.handleScroll);
+                this.scrollableParent = null;
+            }
         }
 
         destroy() {
@@ -518,6 +597,9 @@
             document.removeEventListener('keydown', this.handleKeyDown);
             document.removeEventListener('selectionchange', this.handleSelectionChange);
             window.removeEventListener('scroll', this.handleScroll);
+            if (this.scrollableParent) {
+                this.scrollableParent.removeEventListener('scroll', this.handleScroll);
+            }
             this.removeExistingLayer();
         }
     }
