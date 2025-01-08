@@ -10,7 +10,9 @@
             };
             this.initializeSettings();
             this.translations = window.translations;
-            this.scrollableParent = null; // 스크롤 가능한 부모 요소 저장
+
+            // 스크롤 가능한 부모 요소 배열
+            this.scrollableParents = [];
         }
 
         async initializeSettings() {
@@ -38,12 +40,16 @@
             this.handleMouseUp = this.handleMouseUp.bind(this);
             this.handleKeyDown = this.handleKeyDown.bind(this);
             this.handleSelectionChange = this.handleSelectionChange.bind(this);
-            this.handleScroll = this.handleScroll.bind(this);
+            this.handleScrollOrResize = this.handleScrollOrResize.bind(this);
 
             document.addEventListener('mouseup', this.handleMouseUp);
             document.addEventListener('keydown', this.handleKeyDown);
             document.addEventListener('selectionchange', this.handleSelectionChange);
-            window.addEventListener('scroll', this.handleScroll);
+
+            // 윈도우 스크롤 이벤트는 항상 등록
+            window.addEventListener('scroll', this.handleScrollOrResize);
+            // 윈도우 리사이즈 이벤트 등록
+            window.addEventListener('resize', this.handleScrollOrResize);
 
             this.initializeStyles();
         }
@@ -67,33 +73,36 @@
             }, 3000);
         }
 
-        // 스크롤 가능한 부모 요소 찾기
-        findScrollableParent(element) {
-            if (!element) return null;
-            
-            const isScrollable = (el) => {
-                const style = window.getComputedStyle(el);
-                const overflowY = style.getPropertyValue('overflow-y');
-                return (overflowY === 'scroll' || overflowY === 'auto') && 
-                       el.scrollHeight > el.clientHeight;
-            };
-
+        // 모든 스크롤 부모 요소를 찾아 배열로 반환
+        findScrollableParents(element) {
+            const scrollableParents = [];
             let parent = element.parentElement;
             while (parent) {
-                if (isScrollable(parent)) {
-                    return parent;
+                const style = window.getComputedStyle(parent);
+                const overflowY = style.getPropertyValue('overflow-y');
+                const overflowX = style.getPropertyValue('overflow-x');
+                const isYScrollable = (overflowY === 'scroll' || overflowY === 'auto') && parent.scrollHeight > parent.clientHeight;
+                const isXScrollable = (overflowX === 'scroll' || overflowX === 'auto') && parent.scrollWidth > parent.clientWidth;
+
+                if (isYScrollable || isXScrollable) {
+                    scrollableParents.push(parent);
                 }
                 parent = parent.parentElement;
             }
-            return null;
+            return scrollableParents;
         }
 
         handleMouseUp(e) {
-            // container.__createdAt = Date.now();
+            // 특정 영역을 클릭했을 때 기존 버튼 제거하는 로직
             if (e.target.closest('#selection-buttons') || e.target.closest('#settings-panel')) return;
-            // 'selection-buttons'
+
             const container = document.getElementById('selection-buttons');
-            if (container && container.__createdAt && Date.now() - container.__createdAt > 100 && this.prevSelectionText === window.getSelection().toString()) {
+            if (
+                container &&
+                container.__createdAt &&
+                Date.now() - container.__createdAt > 100 &&
+                this.prevSelectionText === window.getSelection().toString()
+            ) {
                 container.remove();
                 window.getSelection().removeAllRanges();
                 return;
@@ -109,14 +118,15 @@
             // 편집 가능한 요소 체크
             const editableElement = selectedNode.parentElement?.closest('[contenteditable="true"], input, textarea, [role="textbox"]');
             const currentlyFocusedElement = document.activeElement;
-            // 현재 포커스된 요소가 편집 가능한지 확인
-            if (currentlyFocusedElement && (
-                currentlyFocusedElement.hasAttribute('contenteditable') ||
-                currentlyFocusedElement.tagName === 'INPUT' ||
-                currentlyFocusedElement.tagName === 'TEXTAREA' ||
-                currentlyFocusedElement.getAttribute('role') === 'textbox' ||
-                currentlyFocusedElement.isContentEditable
-            )) return;
+            if (
+                currentlyFocusedElement && (
+                    currentlyFocusedElement.hasAttribute('contenteditable') ||
+                    currentlyFocusedElement.tagName === 'INPUT' ||
+                    currentlyFocusedElement.tagName === 'TEXTAREA' ||
+                    currentlyFocusedElement.getAttribute('role') === 'textbox' ||
+                    currentlyFocusedElement.isContentEditable
+                )
+            ) return;
             if (editableElement) return;
 
             // contentEditable 속성 직접 체크
@@ -148,65 +158,76 @@
                 parent = parent.parentElement;
             }
 
+            // 이전 레이어 제거
             this.removeExistingLayer();
 
             const selectedText = selection.toString();
             if (!selectedText) return;
 
+            // range 추출
             const range = selection.getRangeAt(0);
-            const startContainer = range.startContainer;
-            const endContainer = range.endContainer;
 
-            // 스크롤 가능한 부모 요소 찾기
-            this.scrollableParent = this.findScrollableParent(startContainer.parentElement);
-            if (this.scrollableParent) {
-                this.scrollableParent.addEventListener('scroll', this.handleScroll);
-            }
+            // *** 주요 변경: 모든 스크롤 부모 찾아서 이벤트 등록
+            this.scrollableParents = this.findScrollableParents(range.startContainer.parentElement);
 
-            // 여러 엘리먼트에 걸쳐있는 경우
-            if (startContainer.parentElement !== endContainer.parentElement) {
+            // triple click (전체 문장 선택) 관련 처리
+            if (e.detail === 3) {
                 try {
-                    // 선택된 모든 엘리먼트를 순회하면서 실제 텍스트 내용이 있는지 확인
-                    const walker = document.createTreeWalker(
-                        range.commonAncestorContainer,
-                        NodeFilter.SHOW_TEXT,
-                        {
-                            acceptNode: function (node) {
-                                if (range.intersectsNode(node)) {
-                                    return NodeFilter.FILTER_ACCEPT;
+                    const newRange = document.createRange();
+                    newRange.selectNodeContents(range.startContainer);
+                    selection.removeAllRanges();
+                    selection.addRange(newRange);
+                } catch (error) {
+                    console.error('Triple click range adjustment failed:', error);
+                    return;
+                }
+            }
+            // 여러 엘리먼트에 걸쳐있는 경우
+            else {
+                if (range.startContainer.parentElement !== range.endContainer.parentElement) {
+                    try {
+                        const walker = document.createTreeWalker(
+                            range.commonAncestorContainer,
+                            NodeFilter.SHOW_TEXT,
+                            {
+                                acceptNode: (node) => {
+                                    if (range.intersectsNode(node)) {
+                                        return NodeFilter.FILTER_ACCEPT;
+                                    }
+                                    return NodeFilter.FILTER_REJECT;
                                 }
-                                return NodeFilter.FILTER_REJECT;
+                            }
+                        );
+
+                        let node;
+                        const validNodes = [];
+                        while (node = walker.nextNode()) {
+                            const nodeText = node.textContent.trim();
+                            if (nodeText && !/^\s*$/.test(nodeText)) {
+                                validNodes.push(node);
                             }
                         }
-                    );
 
-                    let node;
-                    let validNodes = [];
-                    while (node = walker.nextNode()) {
-                        const nodeText = node.textContent.trim();
-                        if (nodeText && !/^\s*$/.test(nodeText)) {
-                            validNodes.push(node);
+                        if (validNodes.length > 0) {
+                            const newRange = document.createRange();
+                            newRange.setStart(validNodes[0], 0);
+                            newRange.setEnd(validNodes[validNodes.length - 1], validNodes[validNodes.length - 1].length);
+                            selection.removeAllRanges();
+                            selection.addRange(newRange);
                         }
+                    } catch (error) {
+                        console.error('Range adjustment failed:', error);
+                        return;
                     }
-
-                    if (validNodes.length > 0) {
-                        const newRange = document.createRange();
-                        newRange.setStart(validNodes[0], 0);
-                        newRange.setEnd(validNodes[validNodes.length - 1], validNodes[validNodes.length - 1].length);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
-                    }
-                } catch (error) {
-                    console.error('Range adjustment failed:', error);
-                    return;
                 }
             }
 
             // 줄바꿈으로 끝나는 경우 처리
-            if (selectedText.endsWith('\n')) {
+            const currentSelectedText = selection.toString();
+            if (currentSelectedText.endsWith('\n')) {
                 const currentRange = selection.getRangeAt(0);
                 const endContainer = currentRange.endContainer;
-                const endOffset = Math.min(currentRange.endOffset - 0, endContainer.length);
+                const endOffset = Math.min(currentRange.endOffset, endContainer.length);
 
                 try {
                     currentRange.setEnd(endContainer, endOffset);
@@ -218,68 +239,59 @@
                 }
             }
 
+            // 최종 selectedRange와 rect 저장
             this.selectedRange = selection.getRangeAt(0);
             const rect = this.selectedRange.getBoundingClientRect();
-            this.prevSelectionText = window.getSelection().toString();
+            this.prevSelectionText = selection.toString();
 
+            // *** 버튼 컨테이너를 body에 절대 위치로 추가
             this.createButtonContainer(rect);
+
+            // *** 스크롤 가능한 부모 & window에 이벤트 등록
+            this.scrollableParents.forEach(sp => sp.addEventListener('scroll', this.handleScrollOrResize, { passive: true }));
         }
 
         createButtonContainer(rect) {
             const container = document.createElement('div');
             container.id = 'selection-buttons';
             container.style.position = 'absolute';
-            
-            // 스크롤 가능한 부모 요소가 있는 경우 상대적인 위치 계산
-            if (this.scrollableParent) {
-                const parentRect = this.scrollableParent.getBoundingClientRect();
-                container.style.left = `${rect.left - parentRect.left + this.scrollableParent.scrollLeft}px`;
-                container.style.top = `${rect.bottom - parentRect.top + this.scrollableParent.scrollTop + 10}px`;
-            } else {
-                container.style.left = `${window.scrollX + rect.left}px`;
-                container.style.top = `${window.scrollY + rect.bottom + 10}px`;
-            }
-            
             container.style.zIndex = '999999';
             container.__createdAt = Date.now();
 
+            // body에 무조건 추가
+            document.body.appendChild(container);
+
+            // 절대 위치 계산
+            container.style.left = `${window.scrollX + rect.left}px`;
+            container.style.top = `${window.scrollY + rect.bottom + 10}px`;
+
             this.createButtons(container);
-            
-            // 스크롤 가능한 부모 요소가 있는 경우 그 안에 컨테이너 추가
-            if (this.scrollableParent) {
-                this.scrollableParent.appendChild(container);
-            } else {
-                document.body.appendChild(container);
-            }
         }
 
-        handleScroll() {
-            if (this.selectedRange && document.getElementById('selection-buttons')) {
-                const rect = this.selectedRange.getBoundingClientRect();
-                const container = document.getElementById('selection-buttons');
+        // 스크롤 or 리사이즈 시 위치 재계산
+        handleScrollOrResize() {
+            if (!this.selectedRange) return;
 
-                // 스크롤 가능한 부모 요소가 있는 경우
-                if (this.scrollableParent) {
-                    const parentRect = this.scrollableParent.getBoundingClientRect();
-                    
-                    // 선택 영역이 부모 요소의 뷰포트를 벗어났는지 확인
-                    if (rect.top < parentRect.top || rect.bottom > parentRect.bottom) {
-                        this.removeExistingLayer();
-                        return;
-                    }
+            // 현재 selection이 살아있는지 확인
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) {
+                this.removeExistingLayer();
+                return;
+            }
 
-                    container.style.left = `${rect.left - parentRect.left + this.scrollableParent.scrollLeft}px`;
-                    container.style.top = `${rect.bottom - parentRect.top + this.scrollableParent.scrollTop + 10}px`;
-                } else {
-                    // 전체 윈도우 기준으로 처리
-                    if (rect.top < 0 || rect.bottom > window.innerHeight) {
-                        this.removeExistingLayer();
-                        return;
-                    }
+            // 선택 범위 rect 갱신
+            const rect = this.selectedRange.getBoundingClientRect();
 
-                    container.style.left = `${window.scrollX + rect.left}px`;
-                    container.style.top = `${window.scrollY + rect.bottom + 10}px`;
-                }
+            // 화면 밖으로 나가면 제거
+            if (rect.bottom < 0 || rect.top > window.innerHeight) {
+                this.removeExistingLayer();
+                return;
+            }
+
+            const container = document.getElementById('selection-buttons');
+            if (container) {
+                container.style.left = `${window.scrollX + rect.left}px`;
+                container.style.top = `${window.scrollY + rect.bottom + 10}px`;
             }
         }
 
@@ -475,8 +487,11 @@
                 'sw': '스와힐리어'
             };
 
-            const targetLanguage = languageMap[this.settings.language];
-            const response = await this.callOpenAI(text, `당신은 전문 번역가입니다. 주어진 텍스트를 ${targetLanguage}로 자연스럽게 번역해주세요.`);
+            const targetLanguage = languageMap[this.settings.language] || '한국어';
+            const response = await this.callOpenAI(
+                text,
+                `당신은 전문 번역가입니다. 주어진 텍스트를 ${targetLanguage}로 자연스럽게 번역해주세요.`
+            );
             this.updateSelectedText(response, spinnerContainer);
         }
 
@@ -517,7 +532,7 @@
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    model: 'gpt-4o-mini',
+                    model: 'gpt-4o-mini', // 실제 사용시 본인 모델명으로 수정
                     messages: [
                         {
                             role: 'system',
@@ -543,22 +558,21 @@
         updateSelectedText(newText, spinnerContainer) {
             const selection = window.getSelection();
             const range = selection.getRangeAt(0);
+
+            // 선택 영역 내용 교체
             range.deleteContents();
             range.insertNode(document.createTextNode(newText));
             spinnerContainer.remove();
 
+            // 새로 삽입된 텍스트를 기준으로 다시 range를 세팅해둡니다
             this.selectedRange = window.getSelection().getRangeAt(0);
-            const newRect = this.selectedRange.getBoundingClientRect();
+
+            // 위치 재조정
+            const rect = this.selectedRange.getBoundingClientRect();
             const container = document.getElementById('selection-buttons');
             if (container) {
-                if (this.scrollableParent) {
-                    const parentRect = this.scrollableParent.getBoundingClientRect();
-                    container.style.left = `${newRect.left - parentRect.left + this.scrollableParent.scrollLeft}px`;
-                    container.style.top = `${newRect.bottom - parentRect.top + this.scrollableParent.scrollTop + 10}px`;
-                } else {
-                    container.style.left = `${window.scrollX + newRect.left}px`;
-                    container.style.top = `${window.scrollY + newRect.bottom + 10}px`;
-                }
+                container.style.left = `${window.scrollX + rect.left}px`;
+                container.style.top = `${window.scrollY + rect.bottom + 10}px`;
             }
         }
 
@@ -584,21 +598,31 @@
             if (existingLayer) {
                 existingLayer.remove();
             }
-            
+
             // 스크롤 이벤트 리스너 제거
-            if (this.scrollableParent) {
-                this.scrollableParent.removeEventListener('scroll', this.handleScroll);
-                this.scrollableParent = null;
+            if (this.scrollableParents && this.scrollableParents.length) {
+                this.scrollableParents.forEach(sp => {
+                    sp.removeEventListener('scroll', this.handleScrollOrResize);
+                });
             }
+            // window 스크롤/리사이즈는 init 때 등록했으므로 계속 유지하거나, 
+            // 필요에 따라 여기서 remove할 수도 있습니다.
+
+            this.scrollableParents = [];
         }
 
         destroy() {
             document.removeEventListener('mouseup', this.handleMouseUp);
             document.removeEventListener('keydown', this.handleKeyDown);
             document.removeEventListener('selectionchange', this.handleSelectionChange);
-            window.removeEventListener('scroll', this.handleScroll);
-            if (this.scrollableParent) {
-                this.scrollableParent.removeEventListener('scroll', this.handleScroll);
+            window.removeEventListener('scroll', this.handleScrollOrResize);
+            window.removeEventListener('resize', this.handleScrollOrResize);
+
+            // 스크롤 가능한 부모에 대해서도 제거
+            if (this.scrollableParents && this.scrollableParents.length) {
+                this.scrollableParents.forEach(sp => {
+                    sp.removeEventListener('scroll', this.handleScrollOrResize);
+                });
             }
             this.removeExistingLayer();
         }
